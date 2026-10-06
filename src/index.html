@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winxer</title>
+<style>
+:root{--bg:#3a1d7a}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:#fff;font:400 15px "Segoe UI","Selawik","Open Sans",sans-serif;display:flex;flex-direction:column;overflow:hidden;user-select:none}
+.pivot{display:flex;gap:30px;padding:26px 48px 0;align-items:baseline}
+.pivot button{background:none;border:0;color:#fff;opacity:.38;font:200 56px "Segoe UI Light","Segoe UI","Selawik",sans-serif;cursor:pointer;letter-spacing:-1px}
+.pivot button.on{opacity:1}
+.pivot button:focus-visible{outline:2px solid #fff;outline-offset:4px}
+main{flex:1;display:flex;gap:56px;align-items:flex-start;overflow-x:auto;overflow-y:hidden;padding:28px 48px 130px;scrollbar-width:thin;scrollbar-color:#fff5 transparent}
+.grp h2{font:300 22px "Segoe UI Light","Segoe UI",sans-serif;margin-bottom:14px;opacity:.85}
+.row{display:flex;gap:8px}
+.lib{display:grid;grid-template-rows:repeat(3,150px);grid-auto-flow:column;grid-auto-columns:150px;gap:8px}
+.tile{--s:210px;position:relative;width:var(--s);height:var(--s);background:var(--c);padding:12px 14px;display:flex;flex-direction:column;justify-content:flex-end;cursor:pointer;flex:none;transition:transform .12s ease-out,opacity .2s;animation:in .42s cubic-bezier(.1,.9,.2,1) both;animation-delay:var(--d,0ms);transform-origin:center}
+.lib .tile{--s:150px}
+@keyframes in{from{opacity:0;transform:translateX(90px) rotateY(-35deg)}to{opacity:1;transform:none}}
+.tile b{font:600 19px/1.15 "Segoe UI Semibold","Segoe UI",sans-serif;word-break:break-word}
+.tile small{font-size:13px;opacity:.8;margin-top:2px;word-break:break-word}
+.tile .idx{position:absolute;left:12px;top:4px;font:200 54px "Segoe UI Light","Segoe UI",sans-serif;opacity:.9}
+.tile .fmt{position:absolute;right:12px;top:12px;font-size:13px;font-weight:600;background:#0003;padding:1px 6px}
+.lib .tile .fmt{top:10px}
+.tile.dev{background:#0a0a0a;border:0;box-shadow:inset 0 0 0 3px var(--c)}
+.tile.dev .big{position:absolute;left:12px;top:6px;font:200 44px "Segoe UI Light","Segoe UI",sans-serif}
+.tile.off{background:#5b5b66}
+.tile.off .idx,.tile.off b{opacity:.55}
+.tile.off::after{content:"выкл";position:absolute;right:12px;bottom:12px;font-size:13px;opacity:.9}
+.tile.sel{box-shadow:inset 0 0 0 5px #fff}
+.tile.sel::before{content:"";position:absolute;right:0;top:0;border-style:solid;border-width:0 44px 44px 0;border-color:transparent #fff transparent transparent}
+.tile.sel .chk{display:block}
+.chk{display:none;position:absolute;right:5px;top:-1px;color:var(--c);font-weight:700;font-size:17px;z-index:2}
+.tile.sel .fmt{right:50px}
+.tile.add{background:transparent;box-shadow:inset 0 0 0 3px #fff;align-items:center;justify-content:center}
+.tile.add span{font:200 96px/1 "Segoe UI Light","Segoe UI",sans-serif}
+.tile.in{box-shadow:inset 0 0 0 3px #fff9}
+.tile.in::after{content:"в цепочке";position:absolute;right:10px;bottom:10px;font-size:12px;opacity:.9}
+.hint{opacity:.7;font-size:14px;max-width:420px;margin-top:12px;line-height:1.35}
+.hint.warn{opacity:.9;color:#ffb900;font-weight:600}
+.rescan{background:none;border:0;color:#fff;opacity:.7;font:13px "Segoe UI",sans-serif;cursor:pointer;text-decoration:underline;margin-left:14px}
+.bar{position:fixed;left:0;right:0;bottom:0;height:104px;background:#1d1d1d;display:flex;justify-content:center;align-items:flex-start;gap:26px;padding-top:14px;transform:translateY(100%);transition:transform .22s cubic-bezier(.1,.9,.2,1)}
+.bar.up{transform:none}
+.bar button{background:none;border:0;color:#fff;font:13px "Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;min-width:64px}
+.bar i{width:46px;height:46px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;font:normal 300 26px/1 "Segoe UI",sans-serif}
+.bar button:hover i,.bar button:focus-visible i{background:#fff;color:#1d1d1d}
+.bar button:active i{background:#fffc}
+.bar button[disabled]{opacity:.3;pointer-events:none}
+.power{position:fixed;right:48px;bottom:130px}
+.power button{background:#1d1d1d;border:0;color:#fff;font:13px "Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+.power i{width:56px;height:56px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;font:normal 300 30px/1 "Segoe UI",sans-serif;font-style:normal}
+.power.on i{background:#00a300;border-color:#00a300}
+.power span{opacity:.8}
+.msg{position:fixed;left:48px;bottom:130px;background:#1d1d1d;color:#fff;font:13px/1.4 "Segoe UI",sans-serif;padding:10px 14px;max-width:420px;display:none;white-space:pre-wrap}
+.msg.show{display:block}
+@media(max-width:640px){.pivot button{font-size:38px}.pivot{padding:18px 20px 0;gap:18px}main{padding:20px}.bar{gap:6px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<nav class="pivot" id="pivot"></nav>
+<main id="main"></main>
+<div class="power"><button id="pw" data-a="pw"><i>⏻</i><span id="pwl">пуск</span></button></div>
+<div class="msg" id="msg"></div>
+<div class="bar" id="bar">
+  <button data-a="gui"><i>▢</i>окно</button>
+  <button data-a="off"><i>⏻</i>вкл/выкл</button>
+  <button data-a="left"><i>‹</i>раньше</button>
+  <button data-a="right"><i>›</i>позже</button>
+  <button data-a="del"><i>×</i>убрать</button>
+</div>
+<script type="module" src="/main.js"></script>
+</body>
+</html>

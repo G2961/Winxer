@@ -1,0 +1,3 @@
+# target/ живёт на C: — на F: нет места (проверено: 6-10 ГБ debug-сборки).
+[build]
+target-dir = "C:/Users/G2961/.winxer-target"
