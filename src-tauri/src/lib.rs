@@ -70,9 +70,6 @@ fn open_editor(app: AppHandle, path: String, title: String) -> Result<(), String
 
     // Реальный нативный редактор (VST2) в отдельном Win32-окне.
     let native = vsthost::open_editor_window(id, &path, &title);
-    if let Err(e) = &native {
-        crate::vsthost::log(&format!("нативный редактор не открылся: {e} — веб-фолбэк"));
-    }
 
     match native {
         Ok(()) => Ok(()),
