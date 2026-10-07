@@ -97,6 +97,11 @@ enum HostCmd {
         param: u32,
         value: f64,
     },
+    /// Прогрев: один process_audio с тишиной в host-потоке.
+    Warmup {
+        id: u64,
+        ack: std::sync::mpsc::Sender<()>,
+    },
 }
 
 static HOST_TX: Lazy<Mutex<Option<std::sync::mpsc::Sender<HostCmd>>>> =
@@ -143,6 +148,10 @@ fn host_loop(rx: std::sync::mpsc::Receiver<HostCmd>) {
                 HostCmd::OpenEditor { id, path } => open_editor_in_host(id, &path),
                 HostCmd::CloseEditor { id } => close_editor_in_host(id),
                 HostCmd::SetParam { id, param, value } => set_param_in_host(id, param, value),
+                HostCmd::Warmup { id, ack } => {
+                    warmup_in_host(id);
+                    let _ = ack.send(());
+                }
             }
         }
 
@@ -267,6 +276,40 @@ fn set_param_in_host(id: u64, param: u32, value: f64) {
     }
 }
 
+/// Первый process_audio плагина выполняется в host-потоке (STA-апартамент):
+/// у JUCE-плагинов он инициализирует внутренние подсистемы, и из сырого
+/// аудиопотока этот вызов может уронить процесс. Прогрев – с тишиной.
+fn warmup_in_host(id: u64) {
+    let Some(p) = LOADED_VST3.lock().ok().and_then(|m| m.get(&id).cloned()) else {
+        return;
+    };
+    let Ok(mut plugin) = p.plugin.lock() else {
+        return;
+    };
+    let n = plugin.block_size().max(64);
+    let mut buffers = AudioBuffers {
+        inputs: vec![vec![0.0; n], vec![0.0; n]],
+        outputs: vec![vec![0.0; n], vec![0.0; n]],
+        sample_rate: 48_000.0,
+        block_size: n,
+    };
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = plugin.process_audio(&mut buffers);
+    }));
+    if res.is_err() {
+        log(&format!("vst3 id={id}: warmup process паникнул"));
+    }
+}
+
+/// Публичный прогрев: блокирует до выполнения в host-потоке.
+pub fn warmup(id: u64) {
+    let Some(tx) = host_thread() else { return };
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    if tx.send(HostCmd::Warmup { id, ack: ack_tx }).is_ok() {
+        let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(30));
+    }
+}
+
 /// Метаданные для UI.
 pub struct Vst3Meta {
     pub name: String,
@@ -330,6 +373,7 @@ fn plugin_ok(id: u64) {
 pub fn process(id: u64, l: &mut [f32], r: &mut [f32]) -> bool {
     let Ok(p) = get(id) else { return false };
     let Ok(mut plugin) = p.plugin.try_lock() else {
+        plugin_error(id, "process: плагин занят другим потоком (try_lock)");
         return false;
     };
     let inputs = vec![l.to_vec(), r.to_vec()];

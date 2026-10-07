@@ -11,7 +11,7 @@ let LIB = [];                      // приходит из Rust: scan_plugins()
 let DIRS = [];                     // пользовательские папки сканирования
 let chain = [];                    // [{id, name, vendor, format, path, off}]
 let devices = [];      // реальные устройства, если WebView их отдал
-let devIdx = 0, outIdx = 0;
+let devIdx = 0;
 let engineOn = false;
 
 const $ = s => document.querySelector(s);
@@ -19,7 +19,7 @@ const main = $('#main');
 
 // --- сохранение состояния: ничего не сбрасывается при перезапуске приложения ---
 function save() {
-  localStorage.setItem('winxer.state', JSON.stringify({ chain, devIdx, outIdx, devices, devName: deviceName(), outName: outName() }));
+  localStorage.setItem('winxer.state', JSON.stringify({ chain, devIdx, devices, devName: deviceName() }));
 }
 function load() {
   try {
@@ -27,7 +27,6 @@ function load() {
     if (Array.isArray(s.chain)) { chain = s.chain; uid = chain.reduce((m, p) => Math.max(m, p.id), 0) + 1; }
     if (s.devices?.length) devices = s.devices;
     if (s.devName) { const i = devices.indexOf(s.devName); if (i >= 0) devIdx = i; }
-    if (s.outName) { const i = devices.indexOf(s.outName); if (i >= 0) outIdx = i; }
   } catch { }
 }
 function presets() { try { return JSON.parse(localStorage.getItem('winxer.presets') || '{}'); } catch { return {}; } }
@@ -59,15 +58,9 @@ async function enumDevices() {
     if (list.length) devices = list;
   } catch { }
   if (!devices.length) devices = FALLBACK_DEV;
-  // Умный дефолт: источник = кабель (если есть), выход = реальное устройство.
-  if (devIdx === 0 && outIdx === 0) {
-    const cable = devices.findIndex(d => /cable/i.test(d));
-    if (cable > 0) { devIdx = cable; outIdx = cable === 0 ? 1 : 0; }
-  }
 }
 
 function deviceName() { return devices[devIdx] || FALLBACK_DEV[0]; }
-function outName() { return devices[outIdx] || FALLBACK_DEV[0]; }
 
 // Переносимость имени: wbr перед заглавными CamelCase и после «_»/дефиса.
 function wbrName(s) {
@@ -75,7 +68,9 @@ function wbrName(s) {
 }
 
 function tile(p, i) {
-  return `<div class="tile${p.off ? ' off' : ''}${sel === p.id ? ' sel' : ''}" data-id="${p.id}" title="${esc(p.name)} – ${esc(p.path)}" style="--c:${p.c};--d:${i * 70}ms"><span class="chk">✓</span><span class="idx">${String(i + 1).padStart(2, '0')}</span><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b><small>${esc(p.vendor) || 'сторонний'}</small></div>`;
+  // Сохранённый размер (wide – единственный допустимый в горизонтальном ряду).
+  const sz = tileSizes[p.path] === 'wide' ? ' wide' : '';
+  return `<div class="tile${sz}${p.off ? ' off' : ''}${sel === p.id ? ' sel' : ''}" data-id="${p.id}" title="${esc(p.name)} – ${esc(p.path)}" style="--c:${p.c};--d:${i * 70}ms"><span class="chk">✓</span><span class="idx">${String(i + 1).padStart(2, '0')}</span><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b><small>${esc(p.vendor) || 'сторонний'}</small></div>`;
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m])); }
 
@@ -91,17 +86,15 @@ function render() {
     .map(([k, t]) => `<button data-v="${k}" class="${view == k ? 'on' : ''}">${t}</button>`).join('');
 
   if (view == 'chain') {
-    const outHtml = outName() === deviceName()
-      ? `<p class="hint warn">источник и выход совпадают. Выбери разные устройства, иначе звук зациклится</p>`
-      : '';
     main.innerHTML =
       `<section class="grp"><h2>какое устройство фильтровать</h2><div class="row">` +
-      `<div class="tile dev" data-dev style="--c:#2d89ef;--d:0ms"><span class="big">⇥</span><b>${esc(deviceName())}</b><small>нажми, чтобы сменить</small></div>` +
-      `<div class="tile dev" data-devout style="--c:#00a300;--d:70ms"><span class="big">⇤</span><b>${esc(outName())}</b><small>куда играет обработанный</small></div></div>` +
-      outHtml +
+      `<div class="tile dev" data-dev style="--c:#2d89ef;--d:0ms"><span class="big">⇥</span><b>${esc(deviceName())}</b><small>нажми, чтобы сменить</small></div></div>` +
+      `<p class="hint">захват идёт с устройства по умолчанию Windows, наш вывод в него не попадает – петли нет, кабель не нужен. Обработанный звук играет на устройстве выше</p>` +
       `<section class="grp"><h2>обработка, ${chain.length}</h2><div class="row">${chain.map(tile).join('')}<div class="tile add" data-add style="--d:${chain.length * 70}ms"><span>+</span></div></div></section>`;
   } else if (view == 'lib') {
-    const size = p => tileSizes[p.path] || '';
+    // Пробел перед классом размера: без него получается «tiletall», и .tile
+    // перестаёт матчиться — плитка теряет фон и размер (голый текст).
+    const size = p => { const s = tileSizes[p.path]; return s ? ' ' + s : ''; };
     main.innerHTML =
       `<section class="grp"><h2>найдено ${LIB.length}<button class="rescan" data-rescan>пересканировать</button></h2>` +
       `<div class="lib">${LIB.map((p, i) =>
@@ -154,10 +147,10 @@ async function setPower(on) {
     if (!chain.length) { msg('цепочка пуста – добавь плагины'); return; }
     const active = chain.filter(p => !p.off).map(p => p.path);
     if (!active.length) { msg('все плагины в цепочке выключены – включи хотя бы один'); return; }
-    if (deviceName() === outName()) { msg('источник и выход совпадают – будет петля фидбэка. Смени выход'); return; }
+    // Совпадение источника и выхода – легально: process loopback исключает наш вывод.
     console.log('[winxer] пуск:', active);
     try {
-      await invoke('engine_start', { device: deviceName(), outDevice: outName(), chain: active });
+      await invoke('engine_start', { device: deviceName(), outDevice: deviceName(), chain: active });
       engineOn = true;
     } catch (e) { msg('пуск не удался: ' + e); }
   } else {
@@ -179,7 +172,6 @@ main.addEventListener('click', async e => {
     view = 'chain';
   }
   else if (t.hasAttribute('data-dev')) { devIdx = (devIdx + 1) % devices.length; }
-  else if (t.hasAttribute('data-devout')) { outIdx = (outIdx + 1) % devices.length; }
   else if (t.hasAttribute('data-add')) { view = 'lib'; render(); return; }
   else if (t.hasAttribute('data-save-pre')) {
     if (!chain.length) { msg('нечего сохранять – цепочка пуста'); return; }
@@ -214,7 +206,7 @@ main.addEventListener('click', async e => {
     // Пересборка: стоп старого графа, выгрузка удалённых плагинов, старт нового.
     const active = chain.filter(p => !p.off).map(p => p.path);
     try {
-      await invoke('engine_rebuild', { device: deviceName(), outDevice: outName(), chain: active });
+      await invoke('engine_rebuild', { device: deviceName(), outDevice: deviceName(), chain: active });
     } catch (e) { msg('пересборка не удалась: ' + e); }
   }
   render();
@@ -248,7 +240,7 @@ $('#bar').addEventListener('click', async e => {
   if (engineOn) {
     const active = chain.filter(p => !p.off).map(p => p.path);
     try {
-      await invoke('engine_rebuild', { device: deviceName(), outDevice: outName(), chain: active });
+      await invoke('engine_rebuild', { device: deviceName(), outDevice: deviceName(), chain: active });
     } catch (e) { msg('пересборка не удалась: ' + e); }
   }
   render();

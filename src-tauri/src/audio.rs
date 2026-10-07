@@ -8,6 +8,10 @@ use std::thread::JoinHandle;
 const BLOCK: usize = 512;
 const CHANNELS: usize = 2;
 const SR: f32 = 48_000.0;
+/// Буфер захвата app-loopback, сотен наносекунд (20 мс).
+const LOOPBACK_BUFFER_HNS: i64 = 200_000;
+/// Сколько блоков BLOCK ждать в очереди перед дропом (анти-дрейф).
+const FIFO_BLOCKS: usize = 8;
 
 /// Имена всех активных устройств вывода (для выбора источника и выхода).
 pub fn list_render_devices() -> Vec<String> {
@@ -40,6 +44,15 @@ pub struct Engine {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Режим захвата: обычный loopback устройства или app-loopback (без петли).
+enum CaptureMode {
+    /// Loopback выбранного устройства (классика, требует разных устройств).
+    DeviceLoopback,
+    /// Process loopback: захват всего системного звука устройства по умолчанию,
+    /// кроме нашего собственного вывода. Кабель не нужен, петли нет.
+    SameDeviceNoLoop,
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -55,12 +68,16 @@ impl Engine {
         out_device: String,
         chain: Vec<String>,
     ) -> Result<(), String> {
-        // Пустая цепочка допустима: чистый проход (bypass).
-        if out_device == device {
-            return Err("устройство вывода совпадает с источником – будет петля фидбэка. Выбери другое устройство вывода".into());
-        }
-
         self.stop();
+
+        // Источник и выход совпадают: захватываем системный звук через
+        // process loopback с исключением собственного вывода – петли нет,
+        // отдельный виртуальный кабель не нужен.
+        let mode = if out_device == device {
+            CaptureMode::SameDeviceNoLoop
+        } else {
+            CaptureMode::DeviceLoopback
+        };
 
         let flag = Arc::new(AtomicBool::new(false));
         let dev = device.clone();
@@ -72,7 +89,7 @@ impl Engine {
             .spawn(move || {
                 // Паника аудиопотока не должна уходить в пустоту: из-за неё
                 // поток умирает молча, звук пропадает без единой строки лога.
-                let res = std::panic::catch_unwind(|| run_graph(&f, &dev, &odev, &ch));
+                let res = std::panic::catch_unwind(|| run_graph(&f, &dev, &odev, &ch, mode));
                 match res {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
@@ -126,6 +143,7 @@ fn run_graph(
     device_name: &str,
     out_name: &str,
     chain_paths: &[String],
+    mode: CaptureMode,
 ) -> Result<(), String> {
     wasapi::initialize_mta()
         .ok()
@@ -135,24 +153,54 @@ fn run_graph(
     let collection = enumerator
         .get_device_collection(&wasapi::Direction::Render)
         .map_err(|e| format!("collection: {e}"))?;
-    let device = collection
-        .get_device_with_name(device_name)
-        .or_else(|_| enumerator.get_default_device(&wasapi::Direction::Render))
-        .map_err(|e| format!("устройство «{device_name}»: {e}"))?;
 
     let fmt = wasapi::WaveFormat::new(32, 32, &wasapi::SampleType::Float, SR as usize, 2, None);
     let blockalign = fmt.get_blockalign() as usize;
 
-    // 1. Loopback-клиент: ПОЛЛИНГ (WASAPI loopback не поддерживает event-driven).
-    let mut cap_client = device
-        .get_iaudioclient()
-        .map_err(|e| format!("client: {e}"))?;
-    let (def_period, _min) = cap_client
-        .get_device_period()
-        .map_err(|e| format!("period: {e}"))?;
-    let cap_mode = wasapi::StreamMode::PollingShared {
-        autoconvert: true,
-        buffer_duration_hns: def_period,
+    // 1. Захват: два пути.
+    //    - SameDeviceNoLoop: process loopback без нашего дерева процессов.
+    //      Захватывается системный микс устройства по умолчанию, наш вывод
+    //      в него не попадает, петли нет. Client у этого режима бедный:
+    //      get_device_period/get_current_padding не работают, но polling-чтение
+    //      через GetBuffer работает.
+    //    - DeviceLoopback: обычный loopback выбранного устройства (polling,
+    //      WASAPI loopback не поддерживает event-driven).
+    let mut cap_client = match mode {
+        CaptureMode::SameDeviceNoLoop => {
+            wasapi::AudioClient::new_application_loopback_client(std::process::id(), false)
+                .map_err(|e| format!("app loopback: {e}"))?
+        }
+        CaptureMode::DeviceLoopback => {
+            let device = collection
+                .get_device_with_name(device_name)
+                .or_else(|_| enumerator.get_default_device(&wasapi::Direction::Render))
+                .map_err(|e| format!("устройство «{device_name}»: {e}"))?;
+            device
+                .get_iaudioclient()
+                .map_err(|e| format!("client: {e}"))?
+        }
+    };
+
+    let (cap_mode, buffer_hns) = match mode {
+        CaptureMode::SameDeviceNoLoop => (
+            wasapi::StreamMode::PollingShared {
+                autoconvert: true,
+                buffer_duration_hns: LOOPBACK_BUFFER_HNS,
+            },
+            LOOPBACK_BUFFER_HNS,
+        ),
+        CaptureMode::DeviceLoopback => {
+            let (def_period, _min) = cap_client
+                .get_device_period()
+                .map_err(|e| format!("period: {e}"))?;
+            (
+                wasapi::StreamMode::PollingShared {
+                    autoconvert: true,
+                    buffer_duration_hns: def_period,
+                },
+                def_period,
+            )
+        }
     };
     cap_client
         .initialize_client(&fmt, &wasapi::Direction::Capture, &cap_mode)
@@ -161,7 +209,7 @@ fn run_graph(
         .get_audiocaptureclient()
         .map_err(|e| format!("capture: {e}"))?;
 
-    // 2. Render-клиент на ДРУГОМ устройстве.
+    // 2. Render-клиент.
     let out_device = collection
         .get_device_with_name(out_name)
         .or_else(|_| enumerator.get_default_device(&wasapi::Direction::Render))
@@ -171,7 +219,7 @@ fn run_graph(
         .map_err(|e| format!("client2: {e}"))?;
     let out_mode = wasapi::StreamMode::EventsShared {
         autoconvert: true,
-        buffer_duration_hns: def_period,
+        buffer_duration_hns: buffer_hns,
     };
     out_client
         .initialize_client(&fmt, &wasapi::Direction::Render, &out_mode)
@@ -188,6 +236,10 @@ fn run_graph(
     for path in chain_paths {
         let id = crate::vst3support::stable_id(path);
         crate::vst3support::load(id, path)?;
+        // Прогрев: первый process_audio каждого плагина выполняется в host-потоке
+        // (STA-апартамент). У некоторых плагинов (JUCE) первый вызов трогает
+        // COM/UI-подсистему и падает, если его делает сырой аудиопоток.
+        crate::vst3support::warmup(id);
         chain_order.push(id);
     }
 
@@ -204,9 +256,15 @@ fn run_graph(
     let mut out_r = vec![0f32; BLOCK];
     let mut bytebuf = vec![0u8; blockalign * BLOCK];
     let mut interleaved = vec![0f32; BLOCK * CHANNELS];
+    // Диагностика: rms входа/выхода цепочки за первые блоки после пуска.
+    let mut diag_blocks = 100u32;
 
+    let mode_str = match mode {
+        CaptureMode::SameDeviceNoLoop => "без петли (исключён наш вывод)",
+        CaptureMode::DeviceLoopback => "loopback устройства",
+    };
     crate::vst3support::log(&format!(
-        "аудиограф запущен: «{device_name}» → «{out_name}», {} плагинов",
+        "аудиограф запущен: «{device_name}» → «{out_name}», {} плагинов, захват: {mode_str}",
         chain_order.len()
     ));
 
@@ -265,8 +323,24 @@ fn run_graph(
                 out_l[i] = fifo.pop_front().unwrap_or(0.0);
                 out_r[i] = fifo.pop_front().unwrap_or(0.0);
             }
+            let rms_in = rms(&out_l);
             for id in &chain_order {
                 crate::vst3support::process(*id, &mut out_l, &mut out_r);
+                if diag_blocks > 0 && diag_blocks % 10 == 0 {
+                    crate::vst3support::log(&format!(
+                        "диагностика: после id={id:#x} rms {:.4}",
+                        rms(&out_l)
+                    ));
+                }
+            }
+            let rms_out = rms(&out_l);
+            if diag_blocks > 0 {
+                diag_blocks -= 1;
+                if diag_blocks % 10 == 0 {
+                    crate::vst3support::log(&format!(
+                        "диагностика: rms вход {rms_in:.4} → выход {rms_out:.4}"
+                    ));
+                }
             }
             for i in 0..BLOCK {
                 interleaved[i * 2] = out_l[i];
@@ -287,4 +361,9 @@ fn run_graph(
     let _ = out_client.stop_stream();
     crate::vst3support::log("аудиограф остановлен");
     Ok(())
+}
+
+fn rms(v: &[f32]) -> f64 {
+    let s: f64 = v.iter().map(|x| (*x as f64) * (*x as f64)).sum();
+    (s / v.len().max(1) as f64).sqrt()
 }
