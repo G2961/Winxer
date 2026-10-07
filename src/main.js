@@ -69,8 +69,13 @@ async function enumDevices() {
 function deviceName() { return devices[devIdx] || FALLBACK_DEV[0]; }
 function outName() { return devices[outIdx] || FALLBACK_DEV[0]; }
 
+// Переносимость имени: wbr перед заглавными CamelCase и после «_»/дефиса.
+function wbrName(s) {
+  return s.replace(/([a-z0-9])([A-Z])/g, '$1<wbr>$2').replace(/_/g, '_<wbr>');
+}
+
 function tile(p, i) {
-  return `<div class="tile${p.off ? ' off' : ''}${sel === p.id ? ' sel' : ''}" data-id="${p.id}" style="--c:${p.c};--d:${i * 70}ms"><span class="chk">✓</span><span class="idx">${String(i + 1).padStart(2, '0')}</span><span class="fmt">${p.format}</span><b>${esc(p.name)}</b><small>${esc(p.vendor) || 'сторонний'}</small></div>`;
+  return `<div class="tile${p.off ? ' off' : ''}${sel === p.id ? ' sel' : ''}" data-id="${p.id}" title="${esc(p.name)} — ${esc(p.path)}" style="--c:${p.c};--d:${i * 70}ms"><span class="chk">✓</span><span class="idx">${String(i + 1).padStart(2, '0')}</span><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b><small>${esc(p.vendor) || 'сторонний'}</small></div>`;
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m])); }
 
@@ -97,7 +102,7 @@ function render() {
     main.innerHTML =
       `<section class="grp"><h2>найдено ${LIB.length}<button class="rescan" data-rescan>пересканировать</button></h2>` +
       `<div class="lib">${LIB.map((p, i) =>
-        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}${p.arch == 'x86' ? ' · 32-бит (мост)' : ''}</span><b>${esc(p.name)}</b><small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
+        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" title="${esc(p.name)}${p.arch == 'x86' ? ' · 32-бит (мост)' : ''}&#10;${esc(p.path)}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b>${p.arch == 'x86' ? '<small class="x86">32-бит · мост</small>' : ''}<small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
       (LIB.length ? '' : `<section class="grp"><h2>Плагины не найдены</h2><p class="hint">Положи DLL (VST2) или папки .vst3 в C:\\Program Files\\Common Files\\VST3, C:\\Program Files\\VSTPlugins и т.п., затем нажми «пересканировать».</p></section>`);
   } else if (view == 'dirs') {
     main.innerHTML =
@@ -157,6 +162,7 @@ async function setPower(on) {
     engineOn = false;
   }
   $('#pw').classList.toggle('on', engineOn);
+  $('#pw').setAttribute('aria-pressed', engineOn);
   $('#pwl').textContent = engineOn ? 'стоп' : 'пуск';
 }
 
@@ -251,6 +257,8 @@ main.addEventListener('pointerdown', e => {
 ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => main.addEventListener(ev, e => {
   const t = e.target.closest && e.target.closest('.tile'); if (t) t.style.transform = '';
 }, true));
+
+document.addEventListener('contextmenu', e => e.preventDefault());
 
 (async () => {
   load();
