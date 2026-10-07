@@ -51,8 +51,12 @@ main{flex:1;display:flex;gap:56px;align-items:flex-start;overflow-x:auto;overflo
 .bar button:active i{background:#fffc}
 .bar button[disabled]{opacity:.3;pointer-events:none}
 .power{position:fixed;right:48px;bottom:130px}
-.power button{background:#1d1d1d;border:0;color:#fff;font:13px "Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
-.power i{width:56px;height:56px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;font:normal 300 30px/1 "Segoe UI",sans-serif;font-style:normal}
+.power button{background:transparent;border:0;color:#fff;font:13px "Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;outline:none;box-shadow:none}
+.power button:focus,.power button:focus-visible{outline:none;box-shadow:none}
+.power button::-moz-focus-outer{border:0}
+.power i{width:56px;height:56px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;font:normal 300 30px/1 "Segoe UI",sans-serif;font-style:normal;background:rgba(0,0,0,.25)}
+.power button:hover i{background:rgba(255,255,255,.12)}
+.power button:active i{background:rgba(255,255,255,.22)}
 .power.on i{background:#00a300;border-color:#00a300}
 .power span{opacity:.8}
 .msg{position:fixed;left:48px;bottom:130px;background:#1d1d1d;color:#fff;font:13px/1.4 "Segoe UI",sans-serif;padding:10px 14px;max-width:420px;display:none;white-space:pre-wrap}
