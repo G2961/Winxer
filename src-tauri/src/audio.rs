@@ -224,10 +224,19 @@ fn run_graph(
         }
 
         // --- захват: вычитываем всё доступное в FIFO ---
+        // В polling-режиме «данных пока нет» приходит как ОШИБКА
+        // (AUDCLNT_E_BUFFER_EMPTY, код 0x88890001 / строка содержит
+        // "BUFFER_EMPTY" либо исходный HRESULT) — это норма, не смерть графа.
         loop {
             let (frames, _info) = match capture.read_from_device(&mut bytebuf) {
                 Ok(v) => v,
-                Err(e) => return Err(format!("read: {e}")),
+                Err(e) => {
+                    let s = e.to_string();
+                    if s.contains("88890001") || s.contains("BUFFER_EMPTY") {
+                        break; // просто данных ещё нет — ждём следующий проход
+                    }
+                    return Err(format!("read: {e}"));
+                }
             };
             if frames == 0 {
                 break;
@@ -244,11 +253,11 @@ fn run_graph(
             }
         }
 
-        // --- анти-дрейф: не копим больше 8 блоков ---
+        // --- анти-дрейф: при переполнении дропаем ОДИН блок за проход —
+        // сброс кусками давал слышимые щелчки. ---
         let max_fifo = BLOCK * CHANNELS * 8;
         if fifo.len() > max_fifo {
-            let drop_n = fifo.len() - BLOCK * CHANNELS * 2;
-            fifo.drain(0..drop_n);
+            fifo.drain(0..BLOCK * CHANNELS);
         }
 
         // --- обработка и вывод ---
@@ -268,8 +277,12 @@ fn run_graph(
             }
             // Цепочка через крейтовый AudioBuffer (рабочая модель).
             for inst in &instances {
-                let Ok(mut inst) = inst.try_lock() else {
-                    continue;
+                // Poisoned-мьютекс восстанавливаем: одноразовая паника не должна
+                // навсегда выключать плагин из обработки.
+                let mut inst = match inst.try_lock() {
+                    Ok(i) => i,
+                    Err(std::sync::TryLockError::Poisoned(pe)) => pe.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => continue,
                 };
                 let mut buf: AudioBuffer<f32> =
                     host_buf.bind(&[&*out_l, &*out_r], &mut [&mut *scratch_l, &mut *scratch_r]);

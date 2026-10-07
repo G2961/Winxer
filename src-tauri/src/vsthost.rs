@@ -188,12 +188,28 @@ pub fn open_editor_window(id: u64, path: &str, title: &str) -> Result<(), String
 /// Поток одного окна редактора: load → окно → effEditOpen → GetMessage loop.
 fn editor_thread(id: u64, path: &str, title: &str) {
     log(&format!("editor id={id}: поток запущен"));
+    // Паника в нативном коде плагина не должна уходить в пустоту — ловим,
+    // логируем и гасим поток (остальные окна и приложение живут).
+    let res = std::panic::catch_unwind(|| editor_thread_inner(id, path, title));
+    if let Err(e) = res {
+        let what = e
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| e.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "неизвестная паника".into());
+        log(&format!("editor id={id}: ПАНИКА в потоке: {what}"));
+    }
+}
+
+fn editor_thread_inner(id: u64, path: &str, title: &str) {
     unsafe {
         // JUCE-плагины требуют OLE на UI-потоке.
         let _ = windows::Win32::System::Ole::OleInitialize(None);
+        log(&format!("editor id={id}: OLE ок"));
         register_class();
 
         // Загрузка плагина и редактора — в ЭТОМ потоке.
+        log(&format!("editor id={id}: зовём load()"));
         let p = match load(id, path) {
             Ok(p) => p,
             Err(e) => {
@@ -201,9 +217,31 @@ fn editor_thread(id: u64, path: &str, title: &str) {
                 return;
             }
         };
+        log(&format!("editor id={id}: load() готов"));
         let mut editor = {
-            let Ok(mut inst) = p.instance.lock() else {
-                return;
+            // try_lock-цикл вместо блокирующего lock(): аудиопоток берёт мьютекс
+            // try_lock-ом каждый блок, и блокирующий waiter голодает (SRWLOCK
+            // несправедлив — Wider/Origin висли на этом вечно).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut inst = loop {
+                match p.instance.try_lock() {
+                    Ok(i) => break i,
+                    Err(std::sync::TryLockError::Poisoned(pe)) => {
+                        log(&format!(
+                            "editor id={id}: мьютекс отравлен, восстанавливаем"
+                        ));
+                        break pe.into_inner();
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if std::time::Instant::now() > deadline {
+                            log(&format!(
+                                "editor id={id}: не дождались мьютекса 5с — сдаёмся"
+                            ));
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
             };
             match inst.get_editor() {
                 Some(e) => e,
@@ -319,9 +357,10 @@ use windows::core::PCSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-    GetMessageA, RegisterClassA, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WM_CLOSE, WM_DESTROY, WM_TIMER, WNDCLASSA, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetMessageA, IsWindowVisible, RegisterClassA, SetForegroundWindow, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_TIMER, WNDCLASSA, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 const WINXER_CLASS: &[u8] = b"WinxerEditorHost\0";
@@ -343,7 +382,12 @@ unsafe fn register_class() {
 unsafe extern "system" fn editor_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER => {
-            // effEditIdle для редактора ЭТОГО окна: ищем сессию по hwnd.
+            // effEditIdle ТОЛЬКО видимым окнам этого потока: idle спрятанным
+            // окнам держит мьютекс и создаёт заикание аудио.
+            let visible = IsWindowVisible(hwnd).as_bool();
+            if !visible {
+                return LRESULT(0);
+            }
             let plugin = {
                 let Ok(eds) = EDITORS.lock() else {
                     return LRESULT(0);
