@@ -208,8 +208,16 @@ fn editor_thread(id: u64, path: &str, title: &str) {
             match inst.get_editor() {
                 Some(e) => e,
                 None => {
-                    log(&format!("editor id={id}: у плагина нет редактора"));
-                    return;
+                    // Крейт помнит редактор «активным» после прошлой сессии —
+                    // сбрасываем и пробуем снова (окно той сессии давно убито).
+                    inst.reset_editor_flag();
+                    match inst.get_editor() {
+                        Some(e) => e,
+                        None => {
+                            log(&format!("editor id={id}: у плагина нет редактора"));
+                            return;
+                        }
+                    }
                 }
             }
         };

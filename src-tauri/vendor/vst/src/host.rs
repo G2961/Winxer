@@ -724,6 +724,13 @@ impl PluginInstance {
     pub fn editor_active(&self) -> bool {
         self.is_editor_active
     }
+
+    // WINXER PATCH: сброс флага активного редактора — окно убито/скрыто
+    // навсегда, повторный get_editor() должен выдавать новый Box (JUCE
+    // переживает повторный effEditOpen после effEditClose).
+    pub fn reset_editor_flag(&mut self) {
+        self.is_editor_active = false;
+    }
 }
 
 impl PluginParameters for PluginParametersInstance {

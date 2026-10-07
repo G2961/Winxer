@@ -70,9 +70,8 @@ impl Engine {
         out_device: String,
         chain: Vec<String>,
     ) -> Result<(), String> {
-        if chain.is_empty() {
-            return Err("цепочка пуста — добавь хотя бы один включённый плагин".into());
-        }
+        // Пустая цепочка допустима: чистый проход (bypass) — звук не должен
+        // пропадать, когда пользователь выключил все плагины.
         if out_device == device {
             return Err("устройство вывода совпадает с источником — будет петля фидбэка. Выбери другое устройство вывода".into());
         }
@@ -109,7 +108,10 @@ impl Engine {
         self.running = false;
     }
 
-    /// Стоп + выгрузка инстансов, которых больше нет в новой цепочке.
+    /// Пересборка графа: стоп старого потока и старт нового.
+    /// ПЛАГИНЫ НЕ ВЫГРУЖАЮТСЯ: выгрузка рвала связь редактор↔инстанс (крутилки
+    /// крутили мёртвый инстанс, звук шёл через новый с дефолтами) и оставляла
+    /// мёртвые сессии окон. Инстансы живут до закрытия приложения.
     pub fn rebuild(
         &mut self,
         device: String,
@@ -117,16 +119,6 @@ impl Engine {
         chain: Vec<String>,
     ) -> Result<(), String> {
         self.stop();
-        let gone: Vec<u64> = {
-            let map = crate::vsthost::loaded_ids();
-            map.into_iter()
-                .filter(|id| !chain.iter().any(|p| crate::vsthost::stable_id(p) == *id))
-                .collect()
-        };
-        for id in gone {
-            crate::vsthost::log(&format!("выгрузка плагина id={id}"));
-            crate::vsthost::unload(id);
-        }
         self.start(device, out_device, chain)
     }
 }
@@ -155,20 +147,20 @@ fn run_graph(
     let blockalign = fmt.get_blockalign() as usize;
 
     // 1. Loopback-клиент: render-устройство + направление Capture.
-    // БЕЗ ретраиев: как в рабочей версии. Шторм повторов сам инвалидировал
-    // устройство (0x88890014) и убивал звук.
+    //    ПОЛЛИНГ, не события: WASAPI loopback не поддерживает event-driven
+    //    режим (без set_get_eventhandle событийный старт падает с 0x88890014).
     let mut cap_client = device
         .get_iaudioclient()
         .map_err(|e| format!("client: {e}"))?;
     let (def_period, _min) = cap_client
         .get_device_period()
         .map_err(|e| format!("period: {e}"))?;
-    let mode = wasapi::StreamMode::EventsShared {
+    let cap_mode = wasapi::StreamMode::PollingShared {
         autoconvert: true,
         buffer_duration_hns: def_period,
     };
     cap_client
-        .initialize_client(&fmt, &wasapi::Direction::Capture, &mode)
+        .initialize_client(&fmt, &wasapi::Direction::Capture, &cap_mode)
         .map_err(|e| format!("init loopback: {e}"))?;
     let capture = cap_client
         .get_audiocaptureclient()
@@ -182,8 +174,12 @@ fn run_graph(
     let mut out_client = out_device
         .get_iaudioclient()
         .map_err(|e| format!("client2: {e}"))?;
+    let out_mode = wasapi::StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: def_period,
+    };
     out_client
-        .initialize_client(&fmt, &wasapi::Direction::Render, &mode)
+        .initialize_client(&fmt, &wasapi::Direction::Render, &out_mode)
         .map_err(|e| format!("init render: {e}"))?;
     let out_event = out_client
         .set_get_eventhandle()
