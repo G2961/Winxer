@@ -4,6 +4,7 @@
 //! Процессинг зовётся напрямую через AEffect::processReplacing (сырой указатель
 //! из vsthost), без обёрток vst-крейта.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -86,8 +87,22 @@ impl Engine {
         let handle = std::thread::Builder::new()
             .name("winxer-audio".into())
             .spawn(move || {
-                if let Err(e) = run_graph(&f, &dev, &odev, &ch) {
-                    crate::vsthost::log(&format!("аудиопоток остановлен: {e}"));
+                // Паника аудиопотока не должна уходить в пустоту: из-за неё
+                // поток умирает молча, звук пропадает без единой строки лога.
+                let res = std::panic::catch_unwind(|| run_graph(&f, &dev, &odev, &ch));
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        crate::vsthost::log(&format!("аудиопоток остановлен: {e}"));
+                    }
+                    Err(pan) => {
+                        let what = pan
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| pan.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "неизвестная паника".into());
+                        crate::vsthost::log(&format!("аудиопоток ПАНИКА: {what}"));
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -121,6 +136,12 @@ impl Engine {
         self.stop();
         self.start(device, out_device, chain)
     }
+}
+
+/// Элемент цепочки обработки: VST2 или VST3.
+enum ChainItem {
+    Vst2(u64),
+    Vst3(u64),
 }
 
 /// Захват loopback -> цепочка VST -> вывод. Отдельный поток.
@@ -188,13 +209,60 @@ fn run_graph(
         .get_audiorenderclient()
         .map_err(|e| format!("render: {e}"))?;
 
-    // 3. Цепочка VST: инстансы из общей карты vsthost (одна загрузка на DLL).
-    let mut instances: Vec<Arc<Mutex<PluginInstance>>> = Vec::new();
+    // 3. Цепочка: VST2 и VST3 вперемешку. Элемент — либо vst2-инстанс, либо vst3-id.
+    let mut vst2_instances: Vec<Arc<Mutex<vst::host::PluginInstance>>> = Vec::new();
+    let mut vst3_ids: Vec<u64> = Vec::new();
     for path in chain_paths {
-        let id = crate::vsthost::stable_id(path);
-        let p = crate::vsthost::load(id, path)?;
-        instances.push(Arc::clone(&p.instance));
+        if path.to_lowercase().ends_with(".vst3") {
+            let id = crate::vsthost::stable_id(path);
+            crate::vst3support::load(id, path)?;
+            vst3_ids.push(id);
+        } else {
+            let id = crate::vsthost::stable_id(path);
+            let p = crate::vsthost::load(id, path)?;
+            vst2_instances.push(Arc::clone(&p.instance));
+        }
     }
+    // Порядок цепочки: чередуем по исходному списку путей.
+    let chain_order: Vec<ChainItem> = chain_paths
+        .iter()
+        .map(|p| {
+            if p.to_lowercase().ends_with(".vst3") {
+                ChainItem::Vst3(crate::vsthost::stable_id(p))
+            } else {
+                ChainItem::Vst2(crate::vsthost::stable_id(p))
+            }
+        })
+        .collect();
+    // Быстрые карты для процессинга + данные каналов плагинов.
+    let mut vst2_map: HashMap<u64, Arc<Mutex<vst::host::PluginInstance>>> = HashMap::new();
+    let mut vst2_io: HashMap<u64, (usize, usize)> = HashMap::new(); // (inputs, outputs)
+    let mut max_channels = 2usize;
+    for p in chain_paths.iter() {
+        if !p.to_lowercase().ends_with(".vst3") {
+            let id = crate::vsthost::stable_id(p);
+            if let Ok(loaded) = crate::vsthost::load(id, p) {
+                let io = {
+                    match loaded.instance.lock() {
+                        Ok(g) => {
+                            let info = g.get_info();
+                            (info.inputs.max(1) as usize, info.outputs.max(1) as usize)
+                        }
+                        Err(pe) => {
+                            let g = pe.into_inner();
+                            let info = g.get_info();
+                            (info.inputs.max(1) as usize, info.outputs.max(1) as usize)
+                        }
+                    }
+                };
+                max_channels = max_channels.max(io.0).max(io.1);
+                vst2_io.insert(id, io);
+                vst2_map.insert(id, Arc::clone(&loaded.instance));
+            }
+        }
+    }
+    let _ = &vst2_instances;
+    let _ = &vst3_ids;
 
     cap_client
         .start_stream()
@@ -203,19 +271,21 @@ fn run_graph(
         .start_stream()
         .map_err(|e| format!("start render: {e}"))?;
 
-    let mut host_buf = HostBuffer::<f32>::new(CHANNELS, CHANNELS);
+    let mut host_buf = HostBuffer::<f32>::new(max_channels, max_channels);
     let mut fifo: std::collections::VecDeque<f32> =
         std::collections::VecDeque::with_capacity(BLOCK * CHANNELS * 16);
     let mut out_l = vec![0f32; BLOCK];
     let mut out_r = vec![0f32; BLOCK];
-    let mut scratch_l = vec![0f32; BLOCK];
-    let mut scratch_r = vec![0f32; BLOCK];
+    // Многоканальные scratch-буферы: плагин с N входов получает N каналов
+    // (дублируем стерео), иначе крейт паникует «Too few inputs».
+    let mut chans_in: Vec<Vec<f32>> = (0..max_channels).map(|_| vec![0f32; BLOCK]).collect();
+    let mut chans_out: Vec<Vec<f32>> = (0..max_channels).map(|_| vec![0f32; BLOCK]).collect();
     let mut bytebuf = vec![0u8; blockalign * BLOCK];
     let mut interleaved = vec![0f32; BLOCK * CHANNELS];
 
     crate::vsthost::log(&format!(
         "аудиограф запущен: «{device_name}» → «{out_name}», {} плагинов",
-        instances.len()
+        chain_order.len()
     ));
 
     'outer: loop {
@@ -275,20 +345,49 @@ fn run_graph(
                 out_l[i] = fifo.pop_front().unwrap_or(0.0);
                 out_r[i] = fifo.pop_front().unwrap_or(0.0);
             }
-            // Цепочка через крейтовый AudioBuffer (рабочая модель).
-            for inst in &instances {
-                // Poisoned-мьютекс восстанавливаем: одноразовая паника не должна
-                // навсегда выключать плагин из обработки.
-                let mut inst = match inst.try_lock() {
-                    Ok(i) => i,
-                    Err(std::sync::TryLockError::Poisoned(pe)) => pe.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => continue,
-                };
-                let mut buf: AudioBuffer<f32> =
-                    host_buf.bind(&[&*out_l, &*out_r], &mut [&mut *scratch_l, &mut *scratch_r]);
-                inst.process(&mut buf);
-                out_l.copy_from_slice(&scratch_l);
-                out_r.copy_from_slice(&scratch_r);
+            // Цепочка по исходному порядку: VST2 и VST3 вперемешку.
+            for item in &chain_order {
+                match item {
+                    ChainItem::Vst2(id) => {
+                        let Some(inst_arc) = vst2_map.get(id) else {
+                            continue;
+                        };
+                        let mut inst = match inst_arc.try_lock() {
+                            Ok(i) => i,
+                            Err(std::sync::TryLockError::Poisoned(pe)) => pe.into_inner(),
+                            Err(std::sync::TryLockError::WouldBlock) => continue,
+                        };
+                        let (need_in, need_out) = *vst2_io.get(id).unwrap_or(&(2usize, 2usize));
+                        // Стерео дублируется до N входов плагина (иначе крейт
+                        // паникует «Too few inputs» на Pro-Q и подобных).
+                        for ch in 0..need_in {
+                            let src: &[f32] = if ch % 2 == 0 { &out_l } else { &out_r };
+                            chans_in[ch][..BLOCK].copy_from_slice(&src[..BLOCK]);
+                        }
+                        {
+                            let inputs: Vec<&[f32]> =
+                                (0..need_in).map(|ch| &chans_in[ch][..]).collect();
+                            let mut outputs: Vec<&mut [f32]> = Vec::with_capacity(need_out);
+                            for ch in 0..need_out {
+                                outputs.push(unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        chans_out[ch].as_mut_ptr(),
+                                        BLOCK,
+                                    )
+                                });
+                            }
+                            let mut buf: AudioBuffer<f32> = host_buf.bind(&inputs, &mut outputs);
+                            inst.process(&mut buf);
+                        }
+                        // Первые два канала — обратно в стерео.
+                        out_l[..BLOCK].copy_from_slice(&chans_out[0][..BLOCK]);
+                        let r_idx = need_out.saturating_sub(1).min(1);
+                        out_r[..BLOCK].copy_from_slice(&chans_out[r_idx][..BLOCK]);
+                    }
+                    ChainItem::Vst3(id) => {
+                        crate::vst3support::process(*id, &mut out_l, &mut out_r);
+                    }
+                }
             }
             for i in 0..BLOCK {
                 interleaved[i * 2] = out_l[i];

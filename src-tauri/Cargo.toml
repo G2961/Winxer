@@ -27,6 +27,8 @@ vst = { path = "vendor/vst" }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Ole", "Win32_System_Threading"] }
 wasapi = "0.25.0"
 libloading = "0.9.0"
+vst3-host = "0.9.0"
+tauri-plugin-dialog = "2.8.1"
 
 
 # Debug-сборка без PDB-символов: target/ ужимается в ~4-5 раз.

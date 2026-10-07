@@ -1,4 +1,5 @@
 const { invoke } = window.__TAURI__.core;
+const dialog = window.__TAURI__.dialog;
 
 const PAL = ['#00a300','#2d89ef','#da532c','#b91d47','#9f00a7','#00aba9','#e3a21a','#7e3878'];
 const FALLBACK_DEV = ['Устройство по умолчанию'];
@@ -6,8 +7,9 @@ const FALLBACK_DEV = ['Устройство по умолчанию'];
 let uid = 1;
 let view = 'chain';
 let sel = null;
-let LIB = [];          // приходит из Rust: scan_plugins()
-let chain = [];        // [{id, name, vendor, format, path, off, c}]
+let LIB = [];                      // приходит из Rust: scan_plugins()
+let DIRS = [];                     // пользовательские папки сканирования
+let chain = [];                    // [{id, name, vendor, format, path, off}]
 let devices = [];      // реальные устройства, если WebView их отдал
 let devIdx = 0, outIdx = 0;
 let engineOn = false;
@@ -42,8 +44,9 @@ const colorOf = (() => {
 
 async function scan() {
   try {
-    const raw = await invoke('scan_plugins');
+    const [raw, dirs] = await Promise.all([invoke('scan_plugins'), invoke('list_custom_dirs')]);
     LIB = raw.map(p => ({ ...p, c: colorOf(p.path.toLowerCase()) }));
+    DIRS = dirs;
   } catch (e) {
     LIB = [];
     msg('сканирование не удалось: ' + e);
@@ -77,7 +80,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<':
 function winxerId(path) { return path; }
 
 function render() {
-  $('#pivot').innerHTML = [['chain', 'цепочка'], ['lib', 'плагины'], ['pre', 'пресеты']]
+  $('#pivot').innerHTML = [['chain', 'цепочка'], ['lib', 'плагины'], ['dirs', 'папки'], ['pre', 'пресеты']]
     .map(([k, t]) => `<button data-v="${k}" class="${view == k ? 'on' : ''}">${t}</button>`).join('');
 
   if (view == 'chain') {
@@ -94,8 +97,15 @@ function render() {
     main.innerHTML =
       `<section class="grp"><h2>найдено ${LIB.length}<button class="rescan" data-rescan>пересканировать</button></h2>` +
       `<div class="lib">${LIB.map((p, i) =>
-        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}</span><b>${esc(p.name)}</b><small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
+        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}${p.arch == 'x86' ? ' off' : ''}" data-lib="${i}" style="--c:${p.arch == 'x86' ? '#5b5b66' : p.c};--d:${i * 30}ms"><span class="fmt">${p.format}${p.arch == 'x86' ? ' · 32-бит' : ''}</span><b>${esc(p.name)}</b><small>${p.arch == 'x86' ? 'не поддерживается — нужен 64-бит' : esc(p.path)}</small></div>`).join('')}</div></section>` +
       (LIB.length ? '' : `<section class="grp"><h2>Плагины не найдены</h2><p class="hint">Положи DLL (VST2) или папки .vst3 в C:\\Program Files\\Common Files\\VST3, C:\\Program Files\\VSTPlugins и т.п., затем нажми «пересканировать».</p></section>`);
+  } else if (view == 'dirs') {
+    main.innerHTML =
+      `<section class="grp"><h2>где искать плагины, ${DIRS.length}</h2><div class="row">` +
+      DIRS.map((d, i) =>
+        `<div class="tile dir${sel === 'dir:' + i ? ' sel' : ''}" data-dir="${i}" style="--c:${PAL[i % 8]};--d:${i * 60}ms"><b>${esc(d)}</b><small>нажми, чтобы убрать</small></div>`).join('') +
+      `<div class="tile add" data-adddir style="--d:${DIRS.length * 60}ms"><span>+</span></div></div>` +
+      `<p class="hint">Стандартные папки (C:\\Program Files\\VSTPlugins и т.п.) сканируются всегда. Здесь — твои дополнительные. Поиск в них рекурсивный, вложенность до 4 уровней.</p></section>`;
   } else {
     const P = presets();
     const names = Object.keys(P);
@@ -155,6 +165,7 @@ main.addEventListener('click', async e => {
   if (t.dataset.id) { setSel(+t.dataset.id); return; }
   if (t.dataset.lib !== undefined) {
     const p = LIB[+t.dataset.lib];
+    if (p.arch == 'x86') { msg(p.name + ' — 32-битный, нужен 64-бит (переустанови плагин для 64-бит)'); return; }
     if (chain.some(c => c.path == p.path)) { view = 'chain'; render(); return; }
     chain.push({ id: uid++, name: p.name, vendor: p.vendor, format: p.format, path: p.path, off: false, c: p.c });
     view = 'chain';
@@ -173,6 +184,23 @@ main.addEventListener('click', async e => {
   else if (t.dataset.pre !== undefined) {
     const P = presets(); const pl = P[t.dataset.pre];
     if (pl) { chain = pl.map(p => ({ ...p, id: uid++, c: colorOf(p.path.toLowerCase()) })); sel = null; view = 'chain'; msg(`пресет «${t.dataset.pre}» загружен`); }
+  }
+  else if (t.dataset.dir !== undefined) {
+    const d = DIRS[+t.dataset.dir];
+    if (d) {
+      DIRS = await invoke('remove_custom_dir', { dir: d });
+      await scan();
+      msg('папка убрана: ' + d);
+    }
+  }
+  else if (t.hasAttribute('data-adddir')) {
+    const dir = await dialog.open({ directory: true, title: 'папка с плагинами' });
+    if (dir) {
+      DIRS = await invoke('add_custom_dir', { dir });
+      await scan();
+      msg('папка добавлена: ' + dir);
+    }
+    return;
   }
   if (engineOn) {
     // Пересборка: стоп старого графа, выгрузка удалённых плагинов, старт нового.
