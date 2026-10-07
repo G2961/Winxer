@@ -97,7 +97,7 @@ function render() {
     main.innerHTML =
       `<section class="grp"><h2>найдено ${LIB.length}<button class="rescan" data-rescan>пересканировать</button></h2>` +
       `<div class="lib">${LIB.map((p, i) =>
-        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}${p.arch == 'x86' ? ' off' : ''}" data-lib="${i}" style="--c:${p.arch == 'x86' ? '#5b5b66' : p.c};--d:${i * 30}ms"><span class="fmt">${p.format}${p.arch == 'x86' ? ' · 32-бит' : ''}</span><b>${esc(p.name)}</b><small>${p.arch == 'x86' ? 'не поддерживается — нужен 64-бит' : esc(p.path)}</small></div>`).join('')}</div></section>` +
+        `<div class="tile${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}${p.arch == 'x86' ? ' · 32-бит (мост)' : ''}</span><b>${esc(p.name)}</b><small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
       (LIB.length ? '' : `<section class="grp"><h2>Плагины не найдены</h2><p class="hint">Положи DLL (VST2) или папки .vst3 в C:\\Program Files\\Common Files\\VST3, C:\\Program Files\\VSTPlugins и т.п., затем нажми «пересканировать».</p></section>`);
   } else if (view == 'dirs') {
     main.innerHTML =
@@ -165,7 +165,7 @@ main.addEventListener('click', async e => {
   if (t.dataset.id) { setSel(+t.dataset.id); return; }
   if (t.dataset.lib !== undefined) {
     const p = LIB[+t.dataset.lib];
-    if (p.arch == 'x86') { msg(p.name + ' — 32-битный, нужен 64-бит (переустанови плагин для 64-бит)'); return; }
+    // 32-бит теперь поддерживается через мост — блокировки нет.
     if (chain.some(c => c.path == p.path)) { view = 'chain'; render(); return; }
     chain.push({ id: uid++, name: p.name, vendor: p.vendor, format: p.format, path: p.path, off: false, c: p.c });
     view = 'chain';

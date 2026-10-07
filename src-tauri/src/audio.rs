@@ -138,10 +138,12 @@ impl Engine {
     }
 }
 
-/// Элемент цепочки обработки: VST2 или VST3.
+/// Элемент цепочки обработки: VST2, VST3 или 32-битный через мост.
 enum ChainItem {
     Vst2(u64),
     Vst3(u64),
+    /// путь + id в мосте
+    Bridge(String, usize),
 }
 
 /// Захват loopback -> цепочка VST -> вывод. Отдельный поток.
@@ -209,26 +211,39 @@ fn run_graph(
         .get_audiorenderclient()
         .map_err(|e| format!("render: {e}"))?;
 
-    // 3. Цепочка: VST2 и VST3 вперемешку. Элемент — либо vst2-инстанс, либо vst3-id.
+    // 3. Цепочка: VST2, VST3 и x86-через-мост. Сначала пробуем грузить как x64;
+    //    если LoadLibrary не смог (InvalidPath) — это x86-плагин, отправляем в мост.
     let mut vst2_instances: Vec<Arc<Mutex<vst::host::PluginInstance>>> = Vec::new();
     let mut vst3_ids: Vec<u64> = Vec::new();
+    let mut bridge_ids: Vec<(String, usize)> = Vec::new();
     for path in chain_paths {
         if path.to_lowercase().ends_with(".vst3") {
-            let id = crate::vsthost::stable_id(path);
-            crate::vst3support::load(id, path)?;
+            let id = crate::vsthost::stable_id(&path);
+            crate::vst3support::load(id, &path)?;
             vst3_ids.push(id);
         } else {
-            let id = crate::vsthost::stable_id(path);
-            let p = crate::vsthost::load(id, path)?;
-            vst2_instances.push(Arc::clone(&p.instance));
+            let id = crate::vsthost::stable_id(&path);
+            match crate::vsthost::load(id, &path) {
+                Ok(p) => vst2_instances.push(Arc::clone(&p.instance)),
+                Err(e) => {
+                    // 32-битная DLL не грузится в 64-битный процесс — мост.
+                    let bid =
+                        crate::bridge::load(&path).map_err(|be| format!("{e} | мост: {be}"))?;
+                    crate::bridge::remember_id(&path, bid);
+                    crate::vsthost::log(&format!("плагин через мост: {path} (#{bid})"));
+                    bridge_ids.push((path.clone(), bid));
+                }
+            }
         }
     }
-    // Порядок цепочки: чередуем по исходному списку путей.
+    // Порядок цепочки: по исходному списку путей; x86 — через мост.
     let chain_order: Vec<ChainItem> = chain_paths
         .iter()
         .map(|p| {
             if p.to_lowercase().ends_with(".vst3") {
                 ChainItem::Vst3(crate::vsthost::stable_id(p))
+            } else if let Some((_, bid)) = bridge_ids.iter().find(|(bp, _)| bp == p) {
+                ChainItem::Bridge(p.clone(), *bid)
             } else {
                 ChainItem::Vst2(crate::vsthost::stable_id(p))
             }
@@ -386,6 +401,9 @@ fn run_graph(
                     }
                     ChainItem::Vst3(id) => {
                         crate::vst3support::process(*id, &mut out_l, &mut out_r);
+                    }
+                    ChainItem::Bridge(_path, bid) => {
+                        crate::bridge::process(*bid, &mut out_l, &mut out_r);
                     }
                 }
             }

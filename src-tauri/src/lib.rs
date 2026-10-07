@@ -1,6 +1,7 @@
 //! Winxer — системный аудиопроцессор с хостингом VST2/VST3.
 
 mod audio;
+mod bridge;
 mod vst;
 mod vst3support;
 mod vsthost;
@@ -72,13 +73,24 @@ fn plugin_meta(id: u64, path: String) -> Result<serde_json::Value, String> {
     }))
 }
 
-/// Открывает редактор плагина (VST2 или VST3 — по расширению пути).
+/// Открывает редактор плагина (VST2, VST3 или x86-через-мост — по пути).
 #[tauri::command]
 fn open_editor(app: AppHandle, path: String, title: String) -> Result<(), String> {
     let id = vsthost::stable_id(&path);
 
     if path.to_lowercase().ends_with(".vst3") {
         return vst3support::open_editor(id, &path);
+    }
+
+    // x86-плагин: если он не грузится как x64 — он в мосте (или будет там).
+    if vsthost::get(id).is_err() {
+        if let Some(bid) = bridge::bridge_id_for(&path) {
+            return bridge::open_editor(bid);
+        }
+        // Мост ещё не поднянут (движок не стартовал) — поднимаем и грузим.
+        let bid = bridge::load(&path)?;
+        bridge::remember_id(&path, bid);
+        return bridge::open_editor(bid);
     }
 
     let label = format!("editor-{id}");
