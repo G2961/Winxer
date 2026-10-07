@@ -9,7 +9,37 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use vst3_host::{AudioBuffers, Plugin, PluginWindow, Vst3Host};
 
-use crate::vsthost::log;
+use std::io::Write;
+
+/// Лог в файл + stderr.
+pub fn log(msg: &str) {
+    eprintln!("[winxer] {msg}");
+    let path = std::path::Path::new("C:/Users/G2961/.winxer/editor.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            f,
+            "[{}] {msg}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+    }
+}
+
+/// Стабильный id по пути плагина: движок и редактор обращаются к одной загрузке.
+pub fn stable_id(path: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in path.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
 /// Загруженный VST3-плагин: инстанс под мьютексом (крейт требует &mut).
 pub struct LoadedVst3 {
@@ -215,5 +245,19 @@ fn run_editor(id: u64, path: &str) {
             return;
         }
         let _ = w.service_platform_events();
+    }
+}
+
+/// Закрывает/прячет редактор (по команде UI).
+pub fn close_editor(id: u64) -> bool {
+    let sess = VST3_EDITORS.lock().ok().and_then(|mut m| m.remove(&id));
+    if let Some(sess) = sess {
+        if let Ok(mut w) = sess.window.lock() {
+            w.close();
+        }
+        log(&format!("vst3 editor id={id}: закрыт командой"));
+        true
+    } else {
+        false
     }
 }

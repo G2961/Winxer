@@ -1,15 +1,11 @@
-//! Winxer — системный аудиопроцессор с хостингом VST2/VST3.
+//! Winxer — системный аудиопроцессор с хостингом VST3.
 
 mod audio;
-mod bridge;
 mod vst;
 mod vst3support;
-mod vsthost;
 
 use once_cell::sync::Lazy;
-use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use vst::PluginInfo;
 
 pub static ENGINE: Lazy<Mutex<audio::Engine>> = Lazy::new(|| Mutex::new(audio::Engine::new()));
@@ -48,7 +44,7 @@ fn engine_start(device: String, out_device: String, chain: Vec<String>) -> Resul
         .start(device, out_device, chain)
 }
 
-/// Пересборка графа: стоп старого потока, выгрузка исчезнувших плагинов, старт нового.
+/// Пересборка графа: стоп старого потока, старт нового.
 #[tauri::command]
 fn engine_rebuild(device: String, out_device: String, chain: Vec<String>) -> Result<(), String> {
     ENGINE
@@ -64,55 +60,16 @@ fn engine_stop() {
     }
 }
 
+/// Открывает редактор VST3-плагина.
 #[tauri::command]
-fn plugin_meta(id: u64, path: String) -> Result<serde_json::Value, String> {
-    let m = vsthost::meta(id)?;
-    Ok(serde_json::json!({
-        "name": m.name, "vendor": m.vendor,
-        "params": m.params, "presets": m.presets
-    }))
-}
-
-/// Открывает редактор плагина (VST2, VST3 или x86-через-мост — по пути).
-#[tauri::command]
-fn open_editor(app: AppHandle, path: String, title: String) -> Result<(), String> {
-    let id = vsthost::stable_id(&path);
-
-    if path.to_lowercase().ends_with(".vst3") {
-        return vst3support::open_editor(id, &path);
-    }
-
-    // x86-плагин: если он не грузится как x64 — он в мосте (или будет там).
-    if vsthost::get(id).is_err() {
-        if let Some(bid) = bridge::bridge_id_for(&path) {
-            return bridge::open_editor(bid);
-        }
-        // Мост ещё не поднянут (движок не стартовал) — поднимаем и грузим.
-        let bid = bridge::load(&path)?;
-        bridge::remember_id(&path, bid);
-        return bridge::open_editor(bid);
-    }
-
-    let label = format!("editor-{id}");
-    if let Some(w) = app.get_webview_window(&label) {
-        let _ = w.set_focus();
-        return Ok(());
-    }
-
-    // Реальный нативный редактор (VST2) в отдельном Win32-окне.
-    vsthost::open_editor_window(id, &path, &title)
+fn open_editor(path: String) -> Result<(), String> {
+    let id = crate::vst3support::stable_id(&path);
+    vst3support::open_editor(id, &path)
 }
 
 #[tauri::command]
 fn close_editor(id: u64) -> bool {
-    vsthost::close_editor(id)
-}
-
-#[tauri::command]
-fn close_window(app: AppHandle, label: String) {
-    if let Some(w) = app.get_webview_window(&label) {
-        let _ = w.close();
-    }
+    vst3support::close_editor(id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -130,9 +87,7 @@ pub fn run() {
             engine_rebuild,
             engine_stop,
             open_editor,
-            close_editor,
-            close_window,
-            plugin_meta
+            close_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

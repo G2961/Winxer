@@ -2,15 +2,12 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)**
 
-A Metro-style (Windows 8) system-wide audio processor for Windows: equalize and shape any system sound through a chain of VST plugins. Run your music, games or browser through your own plugins – like a mastering rack for the entire system.
+A Metro-style (Windows 8) system-wide audio processor for Windows: equalize and shape any system sound through a chain of VST3 plugins. Run your music, games or browser through your own plugins – like a mastering rack for the entire system.
 
 ## Features
 
 - **System audio capture** – WASAPI loopback: the system plays into a virtual cable (VB-Cable), Winxer picks the sound up, runs it through the plugin chain and outputs to your real speakers or headphones
-- **VST2 x64** – native hosting, plugin editors in separate windows
-- **VST3** – supported via the vst3-host crate
-- **32-bit plugins** – a separate bridge process `winxer-bridge.exe` (x86): plugins that physically cannot load into a 64-bit app work through it
-- **Settings persist** – plugin instances live as long as the app is open; reopening an editor is instant
+- **VST3 hosting** – native editors in separate windows, settings persist while the app is open
 - **Custom scan folders** – plugins do not have to sit in Program Files; the search is recursive, up to 4 levels deep
 - **Chain presets** – save and load whole plugin racks
 - **Metro UI** – tiles, pivot tabs, live feel: tiles bend under the cursor, shrink smoothly at the edges, resize on right-click
@@ -18,23 +15,17 @@ A Metro-style (Windows 8) system-wide audio processor for Windows: equalize and 
 ## How it works
 
 ```
-system → CABLE Input → Winxer (VST chain) → your headphones/speakers
+system → CABLE Input → Winxer (VST3 chain) → your headphones/speakers
 ```
 
-Winxer holds an audio graph: it captures the loopback of the selected device, processes 512-sample blocks through the plugin chain (VST2 / VST3 / x86 bridge) and writes to the output device. While the app is running and "start" is on – the sound goes through the chain.
+Winxer holds an audio graph: it captures the loopback of the selected device, processes 512-sample blocks through the plugin chain and writes to the output device. While the app is running and "start" is on – the sound goes through the chain.
 
 ## Development setup
 
-Requirements: Rust (stable, MSVC), Node.js, the `i686-pc-windows-msvc` target for the bridge.
+Requirements: Rust (stable, MSVC), Node.js.
 
 ```bash
 npm install
-rustup target add i686-pc-windows-msvc
-
-# 32-bit bridge (for x86 plugins)
-cd src-tauri
-cargo build --target i686-pc-windows-msvc --bin winxer-bridge
-# copy winxer-bridge.exe from target/i686-pc-windows-msvc/debug/ next to winxer.exe
 
 # run
 npm run tauri dev
@@ -52,17 +43,14 @@ npm run tauri dev
 
 - `src/` – frontend (Tauri WebView): Metro tiles, chain, presets
 - `src-tauri/src/audio.rs` – audio engine: WASAPI loopback → chain → render
-- `src-tauri/src/vsthost.rs` – VST2 x64 hosting: editor windows, idle, loading
-- `src-tauri/src/vst3support.rs` – VST3 via the vst3-host crate
-- `src-tauri/src/bridge.rs` + `src/bin/winxer-bridge.rs` – the 32-bit bridge (TCP localhost)
-- `src-tauri/vendor/vst/` – the vst crate with a patch: a real effEditIdle (the original idle is empty – without the patch JUCE plugins never repaint their UI)
+- `src-tauri/src/vst3support.rs` – VST3 hosting via the vst3-host crate: loading, processing, editor windows
+- `src-tauri/src/vst.rs` – plugin discovery: standard and custom folders
 
 ## Known limitations
 
 - The VST3 host query set is minimal – rare plugins may fail to open
-- Editors of 32-bit plugins do not sync presets back to the main process (sound and knobs work)
 - Latency of ~20–40 ms is normal for the loopback-through-virtual-cable scheme
 
 ## License
 
-Personal use. Dependencies: vst (MIT), vst3-host (MIT), wasapi (Apache-2.0).
+Personal use. Dependencies: vst3-host (MIT), wasapi (Apache-2.0).

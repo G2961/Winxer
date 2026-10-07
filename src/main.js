@@ -105,8 +105,8 @@ function render() {
     main.innerHTML =
       `<section class="grp"><h2>найдено ${LIB.length}<button class="rescan" data-rescan>пересканировать</button></h2>` +
       `<div class="lib">${LIB.map((p, i) =>
-        `<div class="tile${size(p)}${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" title="${esc(p.name)}${p.arch == 'x86' ? ' · 32-бит (мост)' : ''}&#10;${esc(p.path)}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b>${p.arch == 'x86' ? '<small class="x86">32-бит · мост</small>' : ''}<small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
-      (LIB.length ? '' : `<section class="grp"><h2>Плагины не найдены</h2><p class="hint">Положи DLL (VST2) или папки .vst3 в C:\Program Files\Common Files\VST3, C:\Program Files\VSTPlugins и т.п., затем нажми «пересканировать».</p></section>`);
+        `<div class="tile${size(p)}${chain.some(c => c.path == p.path) ? ' in' : ''}" data-lib="${i}" title="${esc(p.name)}&#10;${esc(p.path)}" style="--c:${p.c};--d:${i * 30}ms"><span class="fmt">${p.format}</span><b>${wbrName(esc(p.name))}</b><small>${esc(p.path)}</small></div>`).join('')}</div></section>` +
+      (LIB.length ? '' : `<section class="grp"><h2>Плагины не найдены</h2><p class="hint">Положи папки .vst3 в C:\Program Files\Common Files\VST3 или добавь свою папку на вкладке «папки», затем нажми «пересканировать».</p></section>`);
   } else if (view == 'dirs') {
     main.innerHTML =
       `<section class="grp"><h2>где искать плагины, ${DIRS.length}</h2><div class="row">` +
@@ -174,7 +174,6 @@ main.addEventListener('click', async e => {
   if (t.dataset.id) { setSel(+t.dataset.id); return; }
   if (t.dataset.lib !== undefined) {
     const p = LIB[+t.dataset.lib];
-    // 32-бит теперь поддерживается через мост — блокировки нет.
     if (chain.some(c => c.path == p.path)) { view = 'chain'; render(); return; }
     chain.push({ id: uid++, name: p.name, vendor: p.vendor, format: p.format, path: p.path, off: false, c: p.c });
     view = 'chain';

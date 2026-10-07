@@ -1,25 +1,10 @@
 //! Аудиодвижок: захват системного звука выбранного устройства (WASAPI loopback),
-//! прогон через цепочку VST2-плагинов, вывод на другое устройство.
-//!
-//! Процессинг зовётся напрямую через AEffect::processReplacing (сырой указатель
-//! из vsthost), без обёрток vst-крейта.
+//! прогон через цепочку VST3-плагинов, вывод на другое устройство.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
-use vst::buffer::AudioBuffer;
-use vst::host::{Host, HostBuffer, PluginInstance};
-use vst::plugin::Plugin;
-
-pub struct WinxerHost;
-impl Host for WinxerHost {
-    fn automate(&self, _index: i32, _value: f32) {}
-    fn get_info(&self) -> (isize, String, String) {
-        (2400, "Winxer".into(), "Winxer Audio".into())
-    }
-    fn update_display(&self) {}
-}
 
 const BLOCK: usize = 512;
 const CHANNELS: usize = 2;
@@ -71,8 +56,7 @@ impl Engine {
         out_device: String,
         chain: Vec<String>,
     ) -> Result<(), String> {
-        // Пустая цепочка допустима: чистый проход (bypass) — звук не должен
-        // пропадать, когда пользователь выключил все плагины.
+        // Пустая цепочка допустима: чистый проход (bypass).
         if out_device == device {
             return Err("устройство вывода совпадает с источником – будет петля фидбэка. Выбери другое устройство вывода".into());
         }
@@ -93,7 +77,7 @@ impl Engine {
                 match res {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        crate::vsthost::log(&format!("аудиопоток остановлен: {e}"));
+                        crate::vst3support::log(&format!("аудиопоток остановлен: {e}"));
                     }
                     Err(pan) => {
                         let what = pan
@@ -101,7 +85,7 @@ impl Engine {
                             .map(|s| s.to_string())
                             .or_else(|| pan.downcast_ref::<String>().cloned())
                             .unwrap_or_else(|| "неизвестная паника".into());
-                        crate::vsthost::log(&format!("аудиопоток ПАНИКА: {what}"));
+                        crate::vst3support::log(&format!("аудиопоток ПАНИКА: {what}"));
                     }
                 }
             })
@@ -124,9 +108,8 @@ impl Engine {
     }
 
     /// Пересборка графа: стоп старого потока и старт нового.
-    /// ПЛАГИНЫ НЕ ВЫГРУЖАЮТСЯ: выгрузка рвала связь редактор↔инстанс (крутилки
-    /// крутили мёртвый инстанс, звук шёл через новый с дефолтами) и оставляла
-    /// мёртвые сессии окон. Инстансы живут до закрытия приложения.
+    /// ПЛАГИНЫ НЕ ВЫГРУЖАЮТСЯ: инстансы живут до закрытия приложения,
+    /// иначе рвётся связь редактор-инстанс.
     pub fn rebuild(
         &mut self,
         device: String,
@@ -138,15 +121,7 @@ impl Engine {
     }
 }
 
-/// Элемент цепочки обработки: VST2, VST3 или 32-битный через мост.
-enum ChainItem {
-    Vst2(u64),
-    Vst3(u64),
-    /// путь + id в мосте
-    Bridge(String, usize),
-}
-
-/// Захват loopback -> цепочка VST -> вывод. Отдельный поток.
+/// Захват loopback -> цепочка VST3 -> вывод. Отдельный поток.
 fn run_graph(
     stop: &AtomicBool,
     device_name: &str,
@@ -169,9 +144,7 @@ fn run_graph(
     let fmt = wasapi::WaveFormat::new(32, 32, &wasapi::SampleType::Float, SR as usize, 2, None);
     let blockalign = fmt.get_blockalign() as usize;
 
-    // 1. Loopback-клиент: render-устройство + направление Capture.
-    //    ПОЛЛИНГ, не события: WASAPI loopback не поддерживает event-driven
-    //    режим (без set_get_eventhandle событийный старт падает с 0x88890014).
+    // 1. Loopback-клиент: ПОЛЛИНГ (WASAPI loopback не поддерживает event-driven).
     let mut cap_client = device
         .get_iaudioclient()
         .map_err(|e| format!("client: {e}"))?;
@@ -211,73 +184,13 @@ fn run_graph(
         .get_audiorenderclient()
         .map_err(|e| format!("render: {e}"))?;
 
-    // 3. Цепочка: VST2, VST3 и x86-через-мост. Сначала пробуем грузить как x64;
-    //    если LoadLibrary не смог (InvalidPath) — это x86-плагин, отправляем в мост.
-    let mut vst2_instances: Vec<Arc<Mutex<vst::host::PluginInstance>>> = Vec::new();
-    let mut vst3_ids: Vec<u64> = Vec::new();
-    let mut bridge_ids: Vec<(String, usize)> = Vec::new();
+    // 3. Цепочка VST3.
+    let mut chain_order: Vec<u64> = Vec::new();
     for path in chain_paths {
-        if path.to_lowercase().ends_with(".vst3") {
-            let id = crate::vsthost::stable_id(&path);
-            crate::vst3support::load(id, &path)?;
-            vst3_ids.push(id);
-        } else {
-            let id = crate::vsthost::stable_id(&path);
-            match crate::vsthost::load(id, &path) {
-                Ok(p) => vst2_instances.push(Arc::clone(&p.instance)),
-                Err(e) => {
-                    // 32-битная DLL не грузится в 64-битный процесс — мост.
-                    let bid =
-                        crate::bridge::load(&path).map_err(|be| format!("{e} | мост: {be}"))?;
-                    crate::bridge::remember_id(&path, bid);
-                    crate::vsthost::log(&format!("плагин через мост: {path} (#{bid})"));
-                    bridge_ids.push((path.clone(), bid));
-                }
-            }
-        }
+        let id = crate::vst3support::stable_id(path);
+        crate::vst3support::load(id, path)?;
+        chain_order.push(id);
     }
-    // Порядок цепочки: по исходному списку путей; x86 — через мост.
-    let chain_order: Vec<ChainItem> = chain_paths
-        .iter()
-        .map(|p| {
-            if p.to_lowercase().ends_with(".vst3") {
-                ChainItem::Vst3(crate::vsthost::stable_id(p))
-            } else if let Some((_, bid)) = bridge_ids.iter().find(|(bp, _)| bp == p) {
-                ChainItem::Bridge(p.clone(), *bid)
-            } else {
-                ChainItem::Vst2(crate::vsthost::stable_id(p))
-            }
-        })
-        .collect();
-    // Быстрые карты для процессинга + данные каналов плагинов.
-    let mut vst2_map: HashMap<u64, Arc<Mutex<vst::host::PluginInstance>>> = HashMap::new();
-    let mut vst2_io: HashMap<u64, (usize, usize)> = HashMap::new(); // (inputs, outputs)
-    let mut max_channels = 2usize;
-    for p in chain_paths.iter() {
-        if !p.to_lowercase().ends_with(".vst3") {
-            let id = crate::vsthost::stable_id(p);
-            if let Ok(loaded) = crate::vsthost::load(id, p) {
-                let io = {
-                    match loaded.instance.lock() {
-                        Ok(g) => {
-                            let info = g.get_info();
-                            (info.inputs.max(1) as usize, info.outputs.max(1) as usize)
-                        }
-                        Err(pe) => {
-                            let g = pe.into_inner();
-                            let info = g.get_info();
-                            (info.inputs.max(1) as usize, info.outputs.max(1) as usize)
-                        }
-                    }
-                };
-                max_channels = max_channels.max(io.0).max(io.1);
-                vst2_io.insert(id, io);
-                vst2_map.insert(id, Arc::clone(&loaded.instance));
-            }
-        }
-    }
-    let _ = &vst2_instances;
-    let _ = &vst3_ids;
 
     cap_client
         .start_stream()
@@ -286,19 +199,14 @@ fn run_graph(
         .start_stream()
         .map_err(|e| format!("start render: {e}"))?;
 
-    let mut host_buf = HostBuffer::<f32>::new(max_channels, max_channels);
     let mut fifo: std::collections::VecDeque<f32> =
         std::collections::VecDeque::with_capacity(BLOCK * CHANNELS * 16);
     let mut out_l = vec![0f32; BLOCK];
     let mut out_r = vec![0f32; BLOCK];
-    // Многоканальные scratch-буферы: плагин с N входов получает N каналов
-    // (дублируем стерео), иначе крейт паникует «Too few inputs».
-    let mut chans_in: Vec<Vec<f32>> = (0..max_channels).map(|_| vec![0f32; BLOCK]).collect();
-    let mut chans_out: Vec<Vec<f32>> = (0..max_channels).map(|_| vec![0f32; BLOCK]).collect();
     let mut bytebuf = vec![0u8; blockalign * BLOCK];
     let mut interleaved = vec![0f32; BLOCK * CHANNELS];
 
-    crate::vsthost::log(&format!(
+    crate::vst3support::log(&format!(
         "аудиограф запущен: «{device_name}» → «{out_name}», {} плагинов",
         chain_order.len()
     ));
@@ -310,15 +218,14 @@ fn run_graph(
 
         // --- захват: вычитываем всё доступное в FIFO ---
         // В polling-режиме «данных пока нет» приходит как ОШИБКА
-        // (AUDCLNT_E_BUFFER_EMPTY, код 0x88890001 / строка содержит
-        // "BUFFER_EMPTY" либо исходный HRESULT) — это норма, не смерть графа.
+        // (AUDCLNT_E_BUFFER_EMPTY) — это норма, не смерть графа.
         loop {
             let (frames, _info) = match capture.read_from_device(&mut bytebuf) {
                 Ok(v) => v,
                 Err(e) => {
                     let s = e.to_string();
                     if s.contains("88890001") || s.contains("BUFFER_EMPTY") {
-                        break; // просто данных ещё нет — ждём следующий проход
+                        break;
                     }
                     return Err(format!("read: {e}"));
                 }
@@ -338,8 +245,7 @@ fn run_graph(
             }
         }
 
-        // --- анти-дрейф: при переполнении дропаем ОДИН блок за проход —
-        // сброс кусками давал слышимые щелчки. ---
+        // --- анти-дрейф: при переполнении дропаем ОДИН блок за проход ---
         let max_fifo = BLOCK * CHANNELS * 8;
         if fifo.len() > max_fifo {
             fifo.drain(0..BLOCK * CHANNELS);
@@ -360,52 +266,8 @@ fn run_graph(
                 out_l[i] = fifo.pop_front().unwrap_or(0.0);
                 out_r[i] = fifo.pop_front().unwrap_or(0.0);
             }
-            // Цепочка по исходному порядку: VST2 и VST3 вперемешку.
-            for item in &chain_order {
-                match item {
-                    ChainItem::Vst2(id) => {
-                        let Some(inst_arc) = vst2_map.get(id) else {
-                            continue;
-                        };
-                        let mut inst = match inst_arc.try_lock() {
-                            Ok(i) => i,
-                            Err(std::sync::TryLockError::Poisoned(pe)) => pe.into_inner(),
-                            Err(std::sync::TryLockError::WouldBlock) => continue,
-                        };
-                        let (need_in, need_out) = *vst2_io.get(id).unwrap_or(&(2usize, 2usize));
-                        // Стерео дублируется до N входов плагина (иначе крейт
-                        // паникует «Too few inputs» на Pro-Q и подобных).
-                        for ch in 0..need_in {
-                            let src: &[f32] = if ch % 2 == 0 { &out_l } else { &out_r };
-                            chans_in[ch][..BLOCK].copy_from_slice(&src[..BLOCK]);
-                        }
-                        {
-                            let inputs: Vec<&[f32]> =
-                                (0..need_in).map(|ch| &chans_in[ch][..]).collect();
-                            let mut outputs: Vec<&mut [f32]> = Vec::with_capacity(need_out);
-                            for ch in 0..need_out {
-                                outputs.push(unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        chans_out[ch].as_mut_ptr(),
-                                        BLOCK,
-                                    )
-                                });
-                            }
-                            let mut buf: AudioBuffer<f32> = host_buf.bind(&inputs, &mut outputs);
-                            inst.process(&mut buf);
-                        }
-                        // Первые два канала — обратно в стерео.
-                        out_l[..BLOCK].copy_from_slice(&chans_out[0][..BLOCK]);
-                        let r_idx = need_out.saturating_sub(1).min(1);
-                        out_r[..BLOCK].copy_from_slice(&chans_out[r_idx][..BLOCK]);
-                    }
-                    ChainItem::Vst3(id) => {
-                        crate::vst3support::process(*id, &mut out_l, &mut out_r);
-                    }
-                    ChainItem::Bridge(_path, bid) => {
-                        crate::bridge::process(*bid, &mut out_l, &mut out_r);
-                    }
-                }
+            for id in &chain_order {
+                crate::vst3support::process(*id, &mut out_l, &mut out_r);
             }
             for i in 0..BLOCK {
                 interleaved[i * 2] = out_l[i];
@@ -424,6 +286,6 @@ fn run_graph(
 
     let _ = cap_client.stop_stream();
     let _ = out_client.stop_stream();
-    crate::vsthost::log("аудиограф остановлен");
+    crate::vst3support::log("аудиограф остановлен");
     Ok(())
 }
