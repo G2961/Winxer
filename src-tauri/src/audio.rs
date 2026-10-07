@@ -1,7 +1,6 @@
 //! Аудиодвижок: захват системного звука выбранного устройства (WASAPI loopback),
 //! прогон через цепочку VST3-плагинов, вывод на другое устройство.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;

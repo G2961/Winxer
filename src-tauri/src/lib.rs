@@ -2,7 +2,7 @@
 
 mod audio;
 mod vst;
-mod vst3support;
+pub mod vst3support;
 
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
