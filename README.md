@@ -1,66 +1,68 @@
 # Winxer
 
-Системный аудиопроцессор для Windows в стиле Metro (Windows 8): эквализация и обработка любого звука системы через цепочку VST-плагинов. Пропусти музыку, игры или браузер через свои плагины – как мастеринг-стойка для всей системы.
+**[English](README.md)** | **[Русский](README.ru.md)**
 
-## Возможности
+A Metro-style (Windows 8) system-wide audio processor for Windows: equalize and shape any system sound through a chain of VST plugins. Run your music, games or browser through your own plugins – like a mastering rack for the entire system.
 
-- **Захват системного звука** – WASAPI loopback: система играет в виртуальный кабель (VB-Cable), Winxer забирает звук, гоняет через цепочку плагинов и выводит на реальные динамики или наушники
-- **VST2 x64** – нативный хостинг, редакторы плагинов в отдельных окнах
-- **VST3** – поддержка через крейт vst3-host
-- **32-битные плагины** – отдельный процесс-мост `winxer-bridge.exe` (x86): плагины, которые физически нельзя загрузить в 64-битное приложение, работают через него
-- **Настройка не сбрасывается** – инстансы плагинов живут, пока открыто приложение; повторное открытие редактора мгновенное
-- **Свои папки сканирования** – плагины не обязаны лежать в Program Files; поиск рекурсивный, до 4 уровней вложенности
-- **Пресеты цепочек** – сохраняй и загружай целые наборы плагинов
-- **Metro-интерфейс** – плитки, pivot-вкладки, живой отклик: прогиб под курсор, плавное сжатие у краёв, изменение размера плиток (ПКМ)
+## Features
 
-## Как это работает
+- **System audio capture** – WASAPI loopback: the system plays into a virtual cable (VB-Cable), Winxer picks the sound up, runs it through the plugin chain and outputs to your real speakers or headphones
+- **VST2 x64** – native hosting, plugin editors in separate windows
+- **VST3** – supported via the vst3-host crate
+- **32-bit plugins** – a separate bridge process `winxer-bridge.exe` (x86): plugins that physically cannot load into a 64-bit app work through it
+- **Settings persist** – plugin instances live as long as the app is open; reopening an editor is instant
+- **Custom scan folders** – plugins do not have to sit in Program Files; the search is recursive, up to 4 levels deep
+- **Chain presets** – save and load whole plugin racks
+- **Metro UI** – tiles, pivot tabs, live feel: tiles bend under the cursor, shrink smoothly at the edges, resize on right-click
+
+## How it works
 
 ```
-система → CABLE Input → Winxer (цепочка VST) → ваши наушники/динамики
+system → CABLE Input → Winxer (VST chain) → your headphones/speakers
 ```
 
-Winxer держит аудиограф: захватывает loopback выбранного устройства, обрабатывает блоки по 512 сэмплов через цепочку плагинов (VST2 / VST3 / мост x86) и пишет в устройство вывода. Пока приложение запущено и включён «пуск» – звук идёт через цепочку.
+Winxer holds an audio graph: it captures the loopback of the selected device, processes 512-sample blocks through the plugin chain (VST2 / VST3 / x86 bridge) and writes to the output device. While the app is running and "start" is on – the sound goes through the chain.
 
-## Установка для разработки
+## Development setup
 
-Требования: Rust (stable, MSVC), Node.js, цель `i686-pc-windows-msvc` для моста.
+Requirements: Rust (stable, MSVC), Node.js, the `i686-pc-windows-msvc` target for the bridge.
 
 ```bash
 npm install
 rustup target add i686-pc-windows-msvc
 
-# 32-битный мост (для x86-плагинов)
+# 32-bit bridge (for x86 plugins)
 cd src-tauri
 cargo build --target i686-pc-windows-msvc --bin winxer-bridge
-# скопируй winxer-bridge.exe из target/i686-pc-windows-msvc/debug/ рядом с winxer.exe
+# copy winxer-bridge.exe from target/i686-pc-windows-msvc/debug/ next to winxer.exe
 
-# запуск
+# run
 npm run tauri dev
 ```
 
-## Использование
+## Usage
 
-1. Поставь VB-Audio Virtual Cable и выбери **CABLE Input** устройством вывода в Windows – системный звук пойдёт в кабель
-2. В Winxer выбери источник (CABLE Input) и выход (твои динамики) – устройства должны быть разными
-3. Собери цепочку на вкладке «плагины» → клик по плитке добавляет в цепочку
-4. Жми «пуск» – звук идёт через плагины
-5. «Окно» у выбранного плагина открывает его редактор; ПКМ по плитке – изменение размера
+1. Install VB-Audio Virtual Cable and set **CABLE Input** as the Windows output device – system sound will flow into the cable
+2. In Winxer pick the source (CABLE Input) and the output (your speakers) – the two must be different devices
+3. Build a chain on the "plugins" tab → clicking a tile adds it to the chain
+4. Press "start" – the sound now goes through the plugins
+5. "Window" on a selected plugin opens its editor; right-click a tile to resize it
 
-## Архитектура
+## Architecture
 
-- `src/` – фронтенд (Tauri WebView): Metro-плитки, цепочка, пресеты
-- `src-tauri/src/audio.rs` – аудиодвижок: WASAPI loopback → цепочка → рендер
-- `src-tauri/src/vsthost.rs` – хостинг VST2 x64: окна редакторов, idle, загрузка
-- `src-tauri/src/vst3support.rs` – VST3 через крейт vst3-host
-- `src-tauri/src/bridge.rs` + `src/bin/winxer-bridge.rs` – 32-битный мост (TCP localhost)
-- `src-tauri/vendor/vst/` – крейт vst с патчем: настоящий effEditIdle (оригинальный idle пуст – без патча JUCE-плагины не перерисовывают интерфейс)
+- `src/` – frontend (Tauri WebView): Metro tiles, chain, presets
+- `src-tauri/src/audio.rs` – audio engine: WASAPI loopback → chain → render
+- `src-tauri/src/vsthost.rs` – VST2 x64 hosting: editor windows, idle, loading
+- `src-tauri/src/vst3support.rs` – VST3 via the vst3-host crate
+- `src-tauri/src/bridge.rs` + `src/bin/winxer-bridge.rs` – the 32-bit bridge (TCP localhost)
+- `src-tauri/vendor/vst/` – the vst crate with a patch: a real effEditIdle (the original idle is empty – without the patch JUCE plugins never repaint their UI)
 
-## Известные ограничения
+## Known limitations
 
-- Формат запросов хоста у VST3 минимален – редкие плагины могут не открываться
-- Редакторы 32-битных плагинов не передают пресеты в основной процесс (звук и крутилки работают)
-- Латентность ~20–40 мс – норма для схемы loopback через виртуальный кабель
+- The VST3 host query set is minimal – rare plugins may fail to open
+- Editors of 32-bit plugins do not sync presets back to the main process (sound and knobs work)
+- Latency of ~20–40 ms is normal for the loopback-through-virtual-cable scheme
 
-## Лицензия
+## License
 
-Личное использование. Зависимости: vst (MIT), vst3-host (MIT), wasapi (Apache-2.0).
+Personal use. Dependencies: vst (MIT), vst3-host (MIT), wasapi (Apache-2.0).
